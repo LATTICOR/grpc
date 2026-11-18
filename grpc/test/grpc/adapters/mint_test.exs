@@ -379,6 +379,36 @@ defmodule GRPC.Client.Adapters.MintTest do
     end
   end
 
+  describe "receive_data/2 - a server stream refused before its first message" do
+    @describetag timeout: 5_000
+
+    for grpc_type <- [:server_stream, :bidirectional_stream] do
+      test "#{grpc_type}: returns the error and stops the stream response process" do
+        {:ok, pid} =
+          GRPC.Client.Adapters.Mint.StreamResponseProcess.start_link(build(:client_stream), false)
+
+        # A trailers-only NOT_FOUND, as a server sends when it refuses the call.
+        :ok =
+          GRPC.Client.Adapters.Mint.StreamResponseProcess.consume(pid, :headers, [
+            {"grpc-status", "5"},
+            {"grpc-message", "not served"}
+          ])
+
+        :ok = GRPC.Client.Adapters.Mint.StreamResponseProcess.done(pid)
+
+        stream =
+          build(:client_stream,
+            grpc_type: unquote(grpc_type),
+            payload: %{stream_response_pid: pid, response: {:ok, %{request_ref: make_ref()}}}
+          )
+
+        assert {:error, %GRPC.RPCError{status: status}} = Mint.receive_data(stream, [])
+        assert status == GRPC.Status.not_found()
+        refute Process.alive?(pid)
+      end
+    end
+  end
+
   describe "receive_data/2 - deadline" do
     setup do
       {:ok, stream_response_pid} =
