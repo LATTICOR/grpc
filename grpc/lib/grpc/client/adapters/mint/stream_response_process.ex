@@ -44,6 +44,17 @@ defmodule GRPC.Client.Adapters.Mint.StreamResponseProcess do
       :halt ->
         nil
 
+      # The process stops by itself once it has delivered an error and the response
+      # is done (see `handle_continue/2`), where this read would have ended the stream.
+      {:after_error, pid} ->
+        try do
+          pid
+          |> get_response(timeout)
+          |> process_response(produce_trailers?, pid, timeout)
+        catch
+          :exit, {reason, {GenServer, :call, _args}} when reason in [:noproc, :normal] -> nil
+        end
+
       pid ->
         pid
         |> get_response(timeout)
@@ -67,6 +78,10 @@ defmodule GRPC.Client.Adapters.Mint.StreamResponseProcess do
     pid
     |> get_response(timeout)
     |> process_response(produce_trailers?, pid, timeout)
+  end
+
+  defp process_response({:error, _} = error, _produce_trailers, pid, _timeout) do
+    {error, {:after_error, pid}}
   end
 
   defp process_response(response, _produce_trailers, pid, _timeout) do
@@ -112,7 +127,8 @@ defmodule GRPC.Client.Adapters.Mint.StreamResponseProcess do
       done: false,
       from: nil,
       compressor: nil,
-      failed: false
+      failed: false,
+      error_delivered: false
     }
 
     {:ok, state}
@@ -216,6 +232,13 @@ defmodule GRPC.Client.Adapters.Mint.StreamResponseProcess do
     without_from? = is_nil(state.from)
 
     cond do
+      # An error ends the call: a caller that got one reads no further, so once the
+      # response is done and nothing is left to read, stop rather than wait forever
+      # for a reader, linked to the caller.
+      state.error_delivered and no_responses? and state.done ->
+        if state.from, do: GenServer.reply(state.from, nil)
+        {:stop, :normal, state}
+
       without_from? ->
         {:noreply, state}
 
@@ -229,7 +252,12 @@ defmodule GRPC.Client.Adapters.Mint.StreamResponseProcess do
       true ->
         {{:value, response}, rest} = :queue.out(state.responses)
         GenServer.reply(state.from, response)
-        {:noreply, %{state | responses: rest, from: nil}}
+        error_delivered = state.error_delivered or match?({:error, _}, response)
+        state = %{state | responses: rest, from: nil, error_delivered: error_delivered}
+
+        if error_delivered and state.done and :queue.is_empty(rest),
+          do: {:stop, :normal, state},
+          else: {:noreply, state}
     end
   end
 

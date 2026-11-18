@@ -302,22 +302,14 @@ if Code.ensure_loaded?(Mint.HTTP) do
          when request_type in [:bidirectional_stream, :server_stream] do
       produce_trailers? = opts[:return_headers] == true
       stream = StreamResponseProcess.build_stream(pid, produce_trailers?)
-
-      case Enum.at(stream, 0) do
-        {:headers, headers} ->
-          if opts[:return_headers] do
-            {:ok, stream, %{headers: headers}}
-          else
-            {:ok, stream}
-          end
-
-        # An error (a refusal such as NOT_FOUND) ends the call, and nobody reads the
-        # stream again. The response process stops only when a reader is waiting,
-        # so stop it here, or it lives as long as the caller it is linked to. The
-        # connection process monitors it and cancels the request if still open.
-        error ->
-          quietly(fn -> GenServer.stop(pid, :normal, @cleanup_timeout) end)
-          error
+      headers_or_error = Enum.at(stream, 0)
+      # if this check fails then an error tuple will be returned
+      with {:headers, headers} <- headers_or_error do
+        if opts[:return_headers] do
+          {:ok, stream, %{headers: headers}}
+        else
+          {:ok, stream}
+        end
       end
     end
 

@@ -387,6 +387,8 @@ defmodule GRPC.Client.Adapters.MintTest do
         {:ok, pid} =
           GRPC.Client.Adapters.Mint.StreamResponseProcess.start_link(build(:client_stream), false)
 
+        ref = Process.monitor(pid)
+
         # A trailers-only NOT_FOUND, as a server sends when it refuses the call.
         :ok =
           GRPC.Client.Adapters.Mint.StreamResponseProcess.consume(pid, :headers, [
@@ -404,7 +406,7 @@ defmodule GRPC.Client.Adapters.MintTest do
 
         assert {:error, %GRPC.RPCError{status: status}} = Mint.receive_data(stream, [])
         assert status == GRPC.Status.not_found()
-        refute Process.alive?(pid)
+        assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
       end
     end
   end

@@ -12,7 +12,8 @@ defmodule GRPC.Client.Adapters.Mint.StreamResponseProcessTest do
       grpc_stream: build(:client_stream),
       responses: :queue.new(),
       compressor: nil,
-      send_headers_or_trailers: false
+      send_headers_or_trailers: false,
+      error_delivered: false
     }
 
     %{state: state}
@@ -360,6 +361,42 @@ defmodule GRPC.Client.Adapters.Mint.StreamResponseProcessTest do
       assert is_nil(from)
       assert :queue.to_list(responses) == [2]
       assert_receive {:tag, 1}
+    end
+  end
+
+  describe "stops once an error is delivered and the response is done" do
+    for {label, items} <- [
+          {"a refusal before any message", [headers: [{"grpc-status", "5"}]]},
+          {"an error in the trailers after headers and a message",
+           [
+             headers: [{"grpc-status", "0"}],
+             data: <<0, 0, 0, 0, 0>>,
+             trailers: [{"grpc-status", "13"}, {"grpc-message", "boom"}]
+           ]}
+        ] do
+      for done_first? <- [true, false] do
+        test "#{label}, done #{if done_first?, do: "before", else: "after"} the error is read" do
+          {:ok, pid} = StreamResponseProcess.start_link(build(:client_stream), true)
+          ref = Process.monitor(pid)
+
+          for {type, data} <- unquote(Macro.escape(items)),
+              do: :ok = StreamResponseProcess.consume(pid, type, data)
+
+          if unquote(done_first?), do: :ok = StreamResponseProcess.done(pid)
+
+          # The caller reads up to the error, as `Enum.reduce_while/3` halting on it does.
+          error =
+            pid
+            |> StreamResponseProcess.build_stream()
+            |> Enum.find(&match?({:error, _}, &1))
+
+          assert {:error, %GRPC.RPCError{}} = error
+
+          unless unquote(done_first?), do: StreamResponseProcess.done(pid)
+
+          assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+        end
+      end
     end
   end
 
